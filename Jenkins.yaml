@@ -1,0 +1,170 @@
+# Provision an EC2 instance
+
+- hosts: localhost
+
+  vars:
+     region: eu-west-1
+     instance_type: m3.medium
+     base_image_name: ami-70edb016
+     number_of_instances_to_create: 1
+
+  tasks:
+
+    - name: Delete existing password file
+      file:
+        path: ./jenkinsPassword.txt
+        state: absent
+
+    - name: Create a suitable set of firewall rules
+      ec2_group:
+         name: jenkins_server_security_groups
+         description: Specific rules for a Jenkins Instance
+         region: "{{ region }}"
+         rules_egress:
+            - proto: tcp
+              from_port: 0
+              to_port: 65535
+              cidr_ip: 0.0.0.0/0
+         rules:
+            - proto: tcp
+              from_port: 22
+              to_port: 22
+              cidr_ip: 0.0.0.0/0
+
+            - proto: tcp
+              from_port: 8080
+              to_port: 8080
+              cidr_ip: 0.0.0.0/0
+
+
+    - name: Start up an EC2 Instance
+      ec2:
+        key_name: microservice
+        group: jenkins_server_security_groups
+        instance_type: "{{ instance_type }}"
+        image: "{{ base_image_name }}"
+        wait: yes
+        region: "{{ region }}"
+        exact_count: "{{ number_of_instances_to_create }}"
+        instance_tags:
+          Name: Jenkins_Server
+        count_tag:
+          Name: Jenkins_Server
+      register: ec2
+
+    - name: Gather the new ip addresses
+      add_host: groups=new_ec2_instances hostname="{{ item.public_ip }}"
+      with_items: "{{ ec2.instances }}"
+
+    - name: Wait for SSH Server to start responding
+      wait_for:
+              port: 22
+              host: "{{ item.public_ip }}"
+              state: started
+      with_items: "{{ ec2.instances }}"
+
+- hosts: new_ec2_instances, tag_Name_Jenkins_Server
+
+  tasks:
+
+    - name: A dummy task to see if dynamic inventory is being found
+      debug: msg="Yes, found the inventory"
+
+    - name: Ensure Apache is NOT on this server.
+      yum: name=httpd state=absent
+      become: yes
+
+    - name: Patch up the server
+      yum: name=* state=latest
+      become: yes
+
+    - name: Add Jenkins Red Hat Repository
+      yum_repository:
+        name: jenkins
+        description: Jenkins Repo
+        baseurl: https://pkg.jenkins.io/redhat-stable
+      become: yes
+
+    - name: Add RPM Key
+      rpm_key:
+         key: https://pkg.jenkins.io/redhat-stable/jenkins.io.key
+      become: yes
+
+    - name: Install Jenkins
+      yum:
+         name: jenkins
+         state: latest
+      become: yes
+
+    - name: Start up Jenkins
+      service:
+         name: jenkins
+         state: started
+         enabled: yes
+      become: yes
+
+    - name: wait for Jenkins to start
+      wait_for:
+          port: 8080
+          state: started
+          delay: 30
+
+    - name: Get initial password
+      fetch:
+          src: /var/lib/jenkins/secrets/initialAdminPassword
+          dest: ./jenkinsPassword.txt
+          flat: yes
+      become: yes
+
+    - name: Install git
+      yum: name=git state=latest
+      become: yes
+
+    - name: Install Ansible
+      pip:
+        name: ansible
+      become: yes
+
+    - name: Boto3
+      pip:
+        name: boto3
+      become: yes
+
+    - name: Prepare Maven Directory
+      file:
+         path: /opt
+         state: directory
+      become: true
+
+    - name: Download Maven
+      get_url:
+         url: https://www.apache.org/dist/maven/maven-3/3.3.9/binaries/apache-maven-3.3.9-bin.tar.gz
+         dest: /opt/maven3.tar.gz
+      become: true
+
+    - name: Unpack Maven
+      unarchive:
+         remote_src: yes
+         src: /opt/maven3.tar.gz
+         dest: /opt/
+      become: true
+
+    - name: Set Mvn command
+      alternatives:
+         name: mvn
+         path: /opt/apache-maven-3.3.9/bin/mvn
+         link: /usr/bin/mvn
+      become: true
+
+    - name: Install JDK
+      yum:
+         name: java-1.8.0-openjdk-devel
+         state: latest
+      become: true
+
+    - name: Use Java8 for Runtime Java
+      alternatives:
+         name: java
+         path: /usr/lib/jvm/jre-1.8.0-openjdk.x86_64/bin/java
+         link: /usr/bin/java
+      become: true
